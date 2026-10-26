@@ -1,57 +1,95 @@
-# RAG-based LLM Assistant
+# GenAI Banking Assistant — FinAI 360 GenAI Module
 
-Portfolio project demonstrating retrieval-augmented generation (RAG): document
-chunking, TF-IDF retrieval, grounded prompt construction, and an optional
-generative answer step with any OpenAI-compatible LLM.
+A clean-room demonstration of the generative AI banking assistant from
+**FinAI 360**, the intelligent banking automation suite I built at Edward
+Jones: retrieval-augmented generation over a banking knowledge base,
+grounded answering, and guided multi-step flows such as KYC onboarding.
 
-> **Data note:** All documents in this project are **synthetic** sample docs
-> (fictional product help articles). No real company documentation, customer
-> data, or production code is used.
+> **What this repo is:** a from-scratch re-implementation of the module's
+> architecture and approach, running on sample documents. It contains no
+> employer code, no customer data, and no production artifacts. Production
+> outcomes below describe the production system; demo results describe
+> this repo's runs.
 
-## Problem
+## Production context
 
-LLMs hallucinate when asked about facts they were not trained on. RAG fixes
-this by retrieving relevant passages from a trusted knowledge base first, then
-asking the model to answer **only from that retrieved context**, with sources
-cited.
+In production, virtual banking assistants powered by OpenAI GPT and
+LangChain RAG automated KYC verification, onboarding, and account
+servicing — resolving over 85% of customer queries autonomously and
+reducing manual support effort. The key discipline was grounding: the
+model answered only from retrieved documents, and said it did not know
+when the documents were silent.
 
-## Approach
+## Architecture
 
-1. **Chunking** — Long docs are split into overlapping word windows so no
-   answer context is cut mid-thought and each chunk stays topically focused.
-2. **Retrieval** — TF-IDF vectors over chunks, ranked by cosine similarity.
-   Runs fully offline with no API key. (Swap in embeddings later; the
-   retriever interface is deliberately small so that change is one file.)
-3. **Grounded answering** — The top chunks are assembled into a prompt that
-   instructs the model to answer from the context and say "I don't know" when
-   the context does not contain the answer.
-4. **Optional LLM step** — If `OPENAI_API_KEY` is set and the `openai`
-   package is installed, `qa.py` calls a chat model; otherwise it returns the
-   retrieved passages as an extractive answer. The pipeline never pretends an
-   extractive fallback is a generated answer.
+```mermaid
+flowchart LR
+    Q["Customer question"] --> R["Retriever\n(knowledge base)"]
+    R --> P["Grounded prompt\n(context + question)"]
+    P --> A["Answer\nLLM if configured,\nelse extractive"]
+    A --> S["Answer + sources"]
+    Q --> F["KYC flow state machine\n(checklist tracking)"]
+```
 
-## How to run
+This demo implements the same RAG shape with a dependency-light TF-IDF
+retriever (LangChain itself is not a dependency here) and an optional
+generative step via any OpenAI-compatible API. The Flask API (`app.py`)
+exposes both asking and the KYC checklist.
+
+## Demo results (sample documents, measured)
+
+Retrieval top-1 accuracy on 6 representative customer questions
+(KYC documents, onboarding, address change, card activation, loan
+timing, fraud reporting): **6/6**. Small sample, reported as-is — the
+point is the pipeline shape (retrieve → ground → answer → cite), not a
+benchmark claim.
+
+Try it:
+
+```bash
+python src/qa.py "What documents do I need for KYC?"
+python src/qa.py "I see a transaction I do not recognize, what do I do?"
+python src/qa.py "What is the weather on Mars?"   # -> says it doesn't know
+```
+
+## Run it
 
 ```bash
 pip install -r requirements.txt
-python src/qa.py "How do I set up SSO?"
-python src/qa.py "What is the data retention policy?"
+
+# Ask a question from the command line
+python src/qa.py "How do I activate a new debit card?"
+
+# Serve the assistant API (port 5001)
+python src/app.py
+# POST /ask  {"question": "..."}  -> {"answer": ..., "sources": [...], "mode": ...}
+# POST /kyc  {"session_id": "s1", "step": "identity_document"} -> checklist status
 ```
+
+Set `OPENAI_API_KEY` (and install `openai`) for generative answers; without
+it, answers are extractive passages from the retrieved documents, labeled
+as such.
+
+Tests: `python -m pytest tests/ -q`.
 
 ## Project structure
 
-```text
-rag-llm-assistant/
-├── README.md
-├── requirements.txt
-├── src/
-│   ├── retriever.py   # sample docs, chunking, TF-IDF retrieval
-│   └── qa.py          # grounded answering (extractive or LLM-backed)
+```
+src/
+  retriever.py    banking knowledge base, chunking, TF-IDF retrieval
+  qa.py           grounded QA: extractive fallback + optional LLM step
+  flows.py        KYC onboarding checklist state machine
+  app.py          Flask API: /ask and /kyc
+tests/
+  test_smoke.py   retrieval, QA grounding, and flow checks
 ```
 
-## Skills demonstrated
+## Tech stack
 
-Python, RAG architecture, document chunking, TF-IDF retrieval, prompt
-engineering, grounded/guardrailed generation, LangChain-style patterns
-(implemented directly here so the retrieval logic is visible, not hidden
-behind a framework call).
+Python, scikit-learn (TF-IDF retrieval), Flask — demonstrating the
+production OpenAI GPT + LangChain RAG pattern in runnable, dependency-light
+form.
+
+## License
+
+MIT

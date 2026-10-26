@@ -1,11 +1,13 @@
-"""Grounded question answering over the sample knowledge base.
+"""Grounded question answering for the banking assistant.
 
-Usage:  python src/qa.py "How do I set up SSO?"
+Usage:  python src/qa.py "What documents do I need for KYC?"
 
 Without an LLM API key this returns the retrieved passages (extractive
 answer) and says so plainly. With ``OPENAI_API_KEY`` set and the ``openai``
 package installed, it asks a chat model to answer strictly from the
 retrieved context, and to say it does not know when the context is silent.
+This mirrors the production assistant's grounding discipline: the model
+never answers banking questions from its own knowledge alone.
 """
 
 from __future__ import annotations
@@ -15,13 +17,16 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from retriever import DOCUMENTS, build_index, retrieve
+from retriever import build_index, retrieve
 
 SYSTEM_PROMPT = (
-    "Answer the question using ONLY the context below. "
-    "If the context does not contain the answer, say you don't know. "
-    "Cite the source document title for each fact you use."
+    "You are a banking assistant. Answer the question using ONLY the "
+    "context below. If the context does not contain the answer, say you "
+    "don't know and suggest contacting support. Cite the source document "
+    "title for each fact you use."
 )
+
+MIN_SCORE = 0.1
 
 
 def build_prompt(question: str, passages: list[dict]) -> str:
@@ -31,45 +36,60 @@ def build_prompt(question: str, passages: list[dict]) -> str:
     return f"{SYSTEM_PROMPT}\n\nContext:\n{context}\n\nQuestion: {question}"
 
 
-def llm_answer(prompt: str) -> str | None:
-    """Return a generated answer, or None when no LLM is configured."""
-    if not os.environ.get("OPENAI_API_KEY"):
-        return None
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return None
-    client = OpenAI()  # reads OPENAI_API_KEY (and OPENAI_BASE_URL) from env
-    response = client.chat.completions.create(
-        model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.0,
+def answer(question: str, top_k: int = 3) -> dict:
+    """Answer a question from the knowledge base. Returns answer + sources."""
+    index = build_index()
+    passages = retrieve(question, index, top_k=top_k)
+    passages = [p for p in passages if p["score"] >= MIN_SCORE]
+    if not passages:
+        return {
+            "answer": "I don't know based on the available documents. "
+                      "Please contact support for help with this question.",
+            "sources": [],
+            "mode": "no_context",
+        }
+    sources = sorted({p["title"] for p in passages})
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": build_prompt(question, passages)},
+                ],
+                temperature=0,
+            )
+            return {
+                "answer": response.choices[0].message.content,
+                "sources": sources,
+                "mode": "generative",
+            }
+        except Exception as exc:
+            print(f"LLM call failed ({exc}); falling back to extractive answer.")
+    extractive = "\n\n".join(
+        f"From {p['title']}: {p['text']}" for p in passages
     )
-    return response.choices[0].message.content
+    return {
+        "answer": extractive,
+        "sources": sources,
+        "mode": "extractive",
+    }
 
 
-def answer(question: str) -> str:
-    vectorizer, matrix, chunks = build_index(DOCUMENTS)
-    passages = retrieve(question, vectorizer, matrix, chunks, top_k=3)
-    if not passages or passages[0]["score"] <= 0:
-        return "I don't know — nothing in the knowledge base covers this."
-
-    generated = llm_answer(build_prompt(question, passages))
-    if generated is not None:
-        return generated
-
-    lines = ["(Extractive answer — no LLM key configured; "
-             "top retrieved passages:)\n"]
-    for p in passages:
-        lines.append(f"[{p['title']} (score {p['score']:.2f})] {p['text']}")
-    return "\n\n".join(lines)
+def main() -> None:
+    if len(sys.argv) < 2:
+        print('Usage: python src/qa.py "What documents do I need for KYC?"')
+        sys.exit(1)
+    result = answer(" ".join(sys.argv[1:]))
+    print(result["answer"])
+    if result["sources"]:
+        print(f"\nSources: {', '.join(result['sources'])} "
+              f"(mode: {result['mode']})")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print('Usage: python src/qa.py "your question"')
-        raise SystemExit(1)
-    print(answer(" ".join(sys.argv[1:])))
+    main()
